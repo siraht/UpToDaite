@@ -126,3 +126,25 @@ In addition to per-file offsets, tracker now keeps a session index in:
 `~/.agent-tracker/state.json` under `sessions`.
 
 Each session entry records source path, session id (when known), project hints, last offset scanned, event counts, and ingestion timestamps.
+
+## Claude Filtering Notes
+
+Claude transcript files contain many intermediate assistant records (`thinking`, planning text, and `tool_use` steps).  
+Tracker keeps only assistant text tied to message IDs that do **not** include `tool_use`, and also drops short planning-prefixed text like `Let me check...` / `I'll start...` to avoid logging in-progress work chatter as final output.
+
+## Rebuild Clean Logs
+
+If older logs were ingested before filter improvements, rebuild a project from transcript history:
+
+```bash
+# optional: back up current logs first
+cp /data/projects/<project>/.agent/outputlog.md /data/projects/<project>/.agent/outputlog.md.bak
+cp /data/projects/<project>/.agent/summarylog.md /data/projects/<project>/.agent/summarylog.md.bak
+cp /data/projects/<project>/.agent/projectstatus.md /data/projects/<project>/.agent/projectstatus.md.bak
+
+# regenerate from full history with current filters
+rm -f /data/projects/<project>/.agent/outputlog.md
+rm -f /data/projects/<project>/.agent/summarylog.md
+rm -f /data/projects/<project>/.agent/projectstatus.md
+python3 tools/project_tracker/tracker.py run --project /data/projects/<project> --reindex --first-seen-history full --engine claude --verbose
+```

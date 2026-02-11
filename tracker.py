@@ -74,6 +74,10 @@ DEFAULT_FIRST_SEEN_HISTORY = "full"
 LLM_TIMEOUT_SECONDS = 120
 EVENT_ID_PATTERN = re.compile(r"\bevent=(.*)$")
 EVENT_HEADER_PATTERN = re.compile(r"^### \[(.+?)\]\s+")
+CLAUDE_INTERMEDIATE_PREFIX_PATTERN = re.compile(
+    r"^\s*(let me\s+(check|start|examine|read|review|inspect|look|run|verify)\b|i['’]?ll\s+(start|check|examine|read|review|inspect|look|run|verify)\b)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -565,6 +569,8 @@ def parse_claude_events(
     session_id = source_state.get("session_id")
 
     events: List[OutputEvent] = []
+    message_has_tool_use: Dict[str, bool] = {}
+    text_candidates: List[Tuple[int, str, str, str, str]] = []
     start_offset = int(source_state.get("offset", 0) or 0)
     iterator, end_offset = iter_jsonl_from_offset(source_path, start_offset)
 
@@ -587,31 +593,55 @@ def parse_claude_events(
             continue
 
         text_parts: List[str] = []
+        has_tool_use = False
         content = message.get("content", [])
         if not isinstance(content, list):
             content = []
         for item in content:
             if not isinstance(item, dict):
                 continue
+            if item.get("type") == "tool_use":
+                has_tool_use = True
             if item.get("type") != "text":
                 continue
             text = item.get("text")
             if isinstance(text, str) and text.strip():
                 text_parts.append(text.strip())
 
-        if not text_parts:
+        msg_id = message.get("id") or obj.get("uuid") or f"line-{line_start}"
+        msg_id = str(msg_id)
+
+        if has_tool_use:
+            message_has_tool_use[msg_id] = True
+
+        if text_parts:
+            ts = obj.get("timestamp") or now_utc_iso()
+            text_candidates.append(
+                (
+                    line_start,
+                    str(ts),
+                    msg_id,
+                    str(cwd_hint or ""),
+                    "\n\n".join(text_parts),
+                )
+            )
+
+    for line_start, ts, msg_id, candidate_cwd_hint, candidate_text in text_candidates:
+        if message_has_tool_use.get(msg_id):
             continue
-        if not cwd_hint:
+        if not candidate_text:
+            continue
+        if CLAUDE_INTERMEDIATE_PREFIX_PATTERN.match(candidate_text) and len(candidate_text) < 400:
+            continue
+        if not candidate_cwd_hint:
             continue
 
-        project_dir = normalize_project_root(Path(cwd_hint), projects_root)
+        project_dir = normalize_project_root(Path(candidate_cwd_hint), projects_root)
         if project_dir is None:
             continue
         if project_filter is not None and project_dir not in project_filter:
             continue
 
-        ts = obj.get("timestamp") or now_utc_iso()
-        msg_id = message.get("id") or obj.get("uuid") or f"line-{line_start}"
         event_id = f"claude:{source_path}:{line_start}"
 
         events.append(
@@ -620,9 +650,9 @@ def parse_claude_events(
                 source="claude",
                 timestamp=str(ts),
                 session_id=session_id or source_path.stem,
-                message_id=str(msg_id),
+                message_id=msg_id,
                 event_id=event_id,
-                text="\n\n".join(text_parts),
+                text=candidate_text,
             )
         )
 
