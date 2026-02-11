@@ -20,13 +20,26 @@ Unread content is everything after the marker to EOF.
 
 ## Commands
 
-Run full pipeline:
+Run full pipeline (discover active tmux projects, ingest, summarize):
 
 ```bash
 python3 tools/project_tracker/tracker.py run --verbose
 ```
 
 Default summarization engine is `claude`. Use `--engine codex` to switch.
+Default first-seen ingestion mode is full history (`--first-seen-history full`), so new transcript files are read from byte 0 instead of tail-only.
+
+When using Claude, tracker invokes the CLI with synthetic settings and interleaved thinking by default:
+
+```bash
+claude --settings ~/.claude/settings-synthetic.json --dangerously-skip-permissions --betas interleaved-thinking -p "<prompt>"
+```
+
+You can override with:
+
+- `--claude-settings /path/to/settings.json`
+- `--claude-betas value`
+- `--no-claude-dangerously-skip-permissions`
 
 Dry run:
 
@@ -34,12 +47,42 @@ Dry run:
 python3 tools/project_tracker/tracker.py run --dry-run --verbose
 ```
 
-`--dry-run` does not call the LLM summarizer and does not mutate files.
+`--dry-run` does not call the LLM summarizer; it reports unread sizes and planned actions without mutating files.
 
-Process one project:
+Discover active projects from tmux only:
+
+```bash
+python3 tools/project_tracker/tracker.py discover
+```
+
+Ingest only:
+
+```bash
+python3 tools/project_tracker/tracker.py ingest --verbose
+```
+
+Summarize only:
+
+```bash
+python3 tools/project_tracker/tracker.py summarize --verbose
+```
+
+Force Codex summarization:
+
+```bash
+python3 tools/project_tracker/tracker.py summarize --engine codex --verbose
+```
+
+Process a specific project (repeat `--project` as needed):
 
 ```bash
 python3 tools/project_tracker/tracker.py run --project /data/projects/research
+```
+
+Ignore tmux filter and process all projects seen in transcript events:
+
+```bash
+python3 tools/project_tracker/tracker.py run --all-projects
 ```
 
 ## Cron (Every 30 Minutes)
@@ -50,8 +93,36 @@ Install/update cron entry:
 bash tools/project_tracker/install_cron.sh
 ```
 
-This creates an idempotent entry tagged with `# project-tracker-30m` and logs to `~/.agent-tracker/cron.log`.
+This creates an idempotent entry tagged with `# project-tracker-30m` and logs to:
+
+`~/.agent-tracker/cron.log`
 
 ## State File
 
-Per-source offsets are kept in `~/.agent-tracker/state.json`.
+Per-source read offsets are kept in:
+
+`~/.agent-tracker/state.json`
+
+For unseen transcript files, the tracker starts according to `--first-seen-history`:
+
+- `full` (default): starts from byte `0` (entire conversation history).
+- `tail`: starts from a tail window (`--initial-tail-bytes`, default `200000`).
+
+Use `--reindex` to rebuild source baselines with the current first-seen policy.
+
+- Full-history baseline (default): `--first-seen-history full`
+- Tail baseline: `--first-seen-history tail --initial-tail-bytes 200000`
+
+To backfill all historical conversations for a project safely (dedupe is event-id based):
+
+```bash
+python3 tools/project_tracker/tracker.py run --project /data/projects/research --reindex --first-seen-history full --verbose
+```
+
+## Session Tracking
+
+In addition to per-file offsets, tracker now keeps a session index in:
+
+`~/.agent-tracker/state.json` under `sessions`.
+
+Each session entry records source path, session id (when known), project hints, last offset scanned, event counts, and ingestion timestamps.

@@ -70,9 +70,9 @@ DEFAULT_CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 DEFAULT_CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings-synthetic.json"
 DEFAULT_CLAUDE_BETAS = "interleaved-thinking"
-DEFAULT_FIRST_SEEN_HISTORY = "tail"
+DEFAULT_FIRST_SEEN_HISTORY = "full"
 LLM_TIMEOUT_SECONDS = 120
-EVENT_ID_PATTERN = re.compile(r"\bevent=(\S+)")
+EVENT_ID_PATTERN = re.compile(r"\bevent=(.*)$")
 
 
 @dataclass
@@ -661,7 +661,17 @@ def read_existing_event_ids(outputlog: Path) -> set[str]:
     if not outputlog.exists():
         return set()
     text = outputlog.read_text(encoding="utf-8")
-    return {m.group(1) for m in EVENT_ID_PATTERN.finditer(text)}
+    event_ids: set[str] = set()
+    for line in text.splitlines():
+        if not line.startswith("### ["):
+            continue
+        match = EVENT_ID_PATTERN.search(line)
+        if not match:
+            continue
+        event_id = match.group(1).strip()
+        if event_id:
+            event_ids.add(event_id)
+    return event_ids
 
 
 def append_output_events(project_dir: Path, events: List[OutputEvent], dry_run: bool = False) -> int:
@@ -871,7 +881,14 @@ def read_outputlog_without_marker(outputlog_path: Path) -> str:
         return ""
     text = outputlog_path.read_text(encoding="utf-8")
     lines = [line for line in text.splitlines() if line.strip() != MARKER_LINE]
-    return "\n".join(lines).strip()
+    first_event_idx: Optional[int] = None
+    for idx, line in enumerate(lines):
+        if line.startswith("### ["):
+            first_event_idx = idx
+            break
+    if first_event_idx is None:
+        return ""
+    return "\n".join(lines[first_event_idx:]).strip()
 
 
 def move_marker_to_eof(outputlog_path: Path, dry_run: bool = False) -> None:
@@ -903,6 +920,10 @@ def read_status_file(path: Path) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     return DEFAULT_STATUS
+
+
+def is_default_status_text(text: str) -> bool:
+    return text.strip() == DEFAULT_STATUS.strip()
 
 
 def trim_text_block(text: str, max_chars: int) -> str:
@@ -1155,8 +1176,10 @@ def summarize_project(
 
     unread_text = read_unread_after_marker(outputlog)
     bootstrap_from_history = False
+    existing_status_text = projectstatus.read_text(encoding="utf-8") if projectstatus.exists() else ""
+    has_meaningful_status = bool(existing_status_text.strip()) and not is_default_status_text(existing_status_text)
     if not unread_text:
-        if projectstatus.exists() and projectstatus.read_text(encoding="utf-8").strip():
+        if has_meaningful_status:
             return {"project": str(project_dir), "processed": False, "reason": "no_unread_content"}
         history_text = read_outputlog_without_marker(outputlog)
         if not history_text:
