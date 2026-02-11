@@ -73,6 +73,7 @@ DEFAULT_CLAUDE_BETAS = "interleaved-thinking"
 DEFAULT_FIRST_SEEN_HISTORY = "full"
 LLM_TIMEOUT_SECONDS = 120
 EVENT_ID_PATTERN = re.compile(r"\bevent=(.*)$")
+EVENT_HEADER_PATTERN = re.compile(r"^### \[(.+?)\]\s+")
 
 
 @dataclass
@@ -933,6 +934,36 @@ def trim_text_block(text: str, max_chars: int) -> str:
     return head + "\n\n[TRUNCATED]\n"
 
 
+def extract_event_highlights(unread_text: str, max_events: int = 8) -> List[Tuple[str, str]]:
+    lines = unread_text.splitlines()
+    highlights: List[Tuple[str, str]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        match = EVENT_HEADER_PATTERN.match(line)
+        if not match:
+            i += 1
+            continue
+
+        ts = match.group(1).strip()
+        i += 1
+        summary: Optional[str] = None
+        while i < len(lines):
+            current = lines[i].strip()
+            if EVENT_HEADER_PATTERN.match(current):
+                break
+            if current and current != MARKER_LINE and not current.startswith("```"):
+                summary = current
+                break
+            i += 1
+
+        if summary:
+            highlights.append((ts, summary))
+            if len(highlights) >= max_events:
+                break
+    return highlights
+
+
 def build_summary_prompt(project_dir: Path, unread_text: str, current_status: str, max_unread_chars: int) -> str:
     unread_block = trim_text_block(unread_text, max_unread_chars)
     return f"""
@@ -1118,17 +1149,25 @@ def codex_summarize(
 
 
 def fallback_summarize(project_dir: Path, unread_text: str) -> Tuple[str, str]:
+    event_highlights = extract_event_highlights(unread_text, max_events=8)
     lines = [line.strip() for line in unread_text.splitlines() if line.strip()]
     interesting = [line for line in lines if not line.startswith("### [") and line != MARKER_LINE]
-    bullets = interesting[:8]
-    if not bullets:
-        bullets = ["No substantial new text in unread window."]
+    fallback_bullets = interesting[:8]
 
     timestamp = now_utc_iso()
     summary_entry = [f"## {timestamp} UTC", "", "- Fallback summary used (configured LLM unavailable)."]
-    summary_entry.extend(f"- {b}" for b in bullets)
+    if event_highlights:
+        summary_entry.append("- Event highlights (timestamped from transcript):")
+        summary_entry.extend(f"- [{ts}] {text}" for ts, text in event_highlights)
+    else:
+        if not fallback_bullets:
+            fallback_bullets = ["No substantial new text in unread window."]
+        summary_entry.extend(f"- {b}" for b in fallback_bullets)
 
-    latest = bullets[0] if bullets else "Unknown"
+    if event_highlights:
+        latest = f"[{event_highlights[-1][0]}] {event_highlights[-1][1]}"
+    else:
+        latest = fallback_bullets[0] if fallback_bullets else "Unknown"
     projectstatus = f"""# Project Status Dashboard
 
 Last updated: {timestamp}
